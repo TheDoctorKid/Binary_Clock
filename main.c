@@ -7,7 +7,7 @@ volatile uint8_t seconds = 0;
 volatile uint8_t minutes = 0;
 volatile uint8_t hours = 0;
 volatile uint8_t sleepMode = 0;
-volatile uint8_t periodTime = 0; // Schaltsekunde Zusatz
+volatile uint16_t periodTime = 0; // Schaltsekunde Zusatz
 
 const uint8_t hoursMapping [5]= {PD7, PD6, PD5, PD1, PD0};
 
