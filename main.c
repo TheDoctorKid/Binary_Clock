@@ -31,12 +31,6 @@ void disablePWM()
     PORTB &= ~((1 << PB1) | (1 << PB2));
 }
 
-void enablePWM() 
-{
-    // PWM wieder aktivieren
-    initPWM();
-}
-
 void initLEDmitTundPWM() 
 {   
     // LED-, Taster-Pins und PWM setzen
@@ -123,7 +117,7 @@ void CheckSleepMode(){
     } 
     else 
     {
-        enablePWM();
+        initPWM();
         set_sleep_mode(SLEEP_MODE_IDLE);
         sleep_enable();   
     }
