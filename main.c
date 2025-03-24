@@ -1,154 +1,245 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
+#include <avr/sleep.h>
 
-// Define the PWM duty cycle (0-255)
-#define PWM_BRIGHTNESS 64
-
-// Time variables
 volatile uint8_t seconds = 0;
 volatile uint8_t minutes = 0;
 volatile uint8_t hours = 0;
-volatile uint8_t eco_mode = 0;
+volatile uint8_t sleepMode = 0;
+volatile uint8_t periodTime = 0; // Schaltsekunde Zusatz
 
-// Initialize Timer0 for PWM output
-void pwm_init() {
-    // Set PB1 and PB2 as outputs (PWM anodes)
-    DDRB |= (1 << PB1) | (1 << PB2);
-    
-    // Configure Timer0 for Fast PWM mode
-    TCCR0A |= (1 << COM0A1) | (1 << COM0B1) | (1 << WGM01) | (1 << WGM00); // Fast PWM for PB1 (OC0A)
-    TCCR0B |= (1 << CS01);  // Prescaler 8
-    
-    // Set PWM brightness
-    OCR0A = PWM_BRIGHTNESS;
+const uint8_t hoursMapping [5]= {PD7, PD6, PD5, PD1, PD0};
+
+void initPWM() 
+{
+    DDRB |= (1 << PB1) | (1 << PB2); // PB1 (OC1A), PB2 (OC1B) als Ausgang
+
+    TCCR1A = (1 << WGM10) | (1 << WGM12) | (1 << COM1A1) | (1 << COM1B1) | (1 << COM1A0) | (1 << COM1B0); 
+    TCCR1B = (1 << CS11); // Prescaler = 8
+
+    OCR1A = 10; // Helligkeit der Stunden-LEDs
+    OCR1B = 10; // Helligkeit Minuten-LEDs
 }
 
-// Initialize Timer1 for the real-time clock
-void timer_init() {
-    // Set Timer1 to CTC mode
-    TCCR1B |= (1 << WGM12);
-    
-    // Set prescaler to 256
-    TCCR1B |= (1 << CS12);  // CS12=1, CS11=0, CS10=0 gives prescaler of 256
-    
-    // Set compare match value for 1 second interrupt (assuming 32768Hz crystal)
-    // 32768 / 256 = 128 ticks per second
-    OCR1A = 128 - 1;
-    
-    // Enable Timer1 compare match interrupt
-    TIMSK1 |= (1 << OCIE1A);
-    
-    // Enable global interrupts
-    sei();
+void disablePWM() 
+{
+    // PWM-Funktionalität deaktivieren
+    TCCR1A = 0;
+    TCCR1B = 0;
+    // Pins als normale Ausgänge setzen
+    PORTB &= ~((1 << PB1) | (1 << PB2));
 }
 
-// Timer1 interrupt service routine
-ISR(TIMER1_COMPA_vect) {
+void enablePWM() 
+{
+    // PWM wieder aktivieren
+    initPWM();
+}
+
+void initLEDmitTundPWM() 
+{   
+    // LED-, Taster-Pins und PWM setzen
+    DDRB |= (1 << PB0); // Sekunden Ausgabe für Zeitmessung
+
+    DDRC |= 0x3F; // PC0-PC5 als Ausgang für Minuten-LEDs
+    DDRD |= (1 << PD0) | (1 << PD1) | (1 << PD5) | (1 << PD6) | (1 << PD7); // Stunden-LEDs
+    PORTD |= (1 << PD2) | (1 << PD3) | (1 << PD4); // Pull-Ups für Taster aktivieren
+    initPWM();
+}
+
+
+void initTimer2() 
+{
+    ASSR |= (1 << AS2); // Aktivierung asynchronen Modus 
+    TCCR2B = (1 << CS22) | (1 << CS20); // Prescaler 128 → (32768 Hz / 128) = 256
+    TIMSK2 = (1 << TOIE2); // Interrupt
+    
+}
+
+void updateLEDs() 
+{
+    // Aktualisierung LED-Anzeige
+    if(sleepMode) {return;}
+
+    PORTC =(PORTC & ~0b00111111) | (minutes & 0x3F); // Minuten LED-Maske
+    uint8_t hours_display = 0;
+
+    for( uint8_t i = 0 ; i < 5; i++)
+    {
+        if (hours & (1 << i))
+        {
+            hours_display |= (1 << hoursMapping[i]);
+        }
+    }
+
+    uint8_t mask =  (1 << PD7) | (1 << PD0) | (1<< PD1) | (1<< PD5) | (1<< PD6);
+    
+    PORTD = (PORTD & ~mask) | ((hours_display & mask)); // Änderung auf relevanter Stundenanzeige
+}
+
+void turnOffLEDs() {
+    // Alle LEDs ausschalten
+    PORTC &= ~0x3F;  // Minuten-LEDs aus
+    uint8_t mask = (1 << PD7) | (1 << PD0) | (1 << PD1) | (1 << PD5) | (1 << PD6);
+    PORTD &= ~mask;  // Stunden-LEDs aus
+    PORTB &= ~(1 << PB0); // Sekunden-LED aus
+}
+
+// ISR für Timer2: Sekundenzähler
+ISR(TIMER2_OVF_vect) 
+{
     seconds++;
+    periodTime++;
     
-    if (seconds >= 60) {
+    // Schaltsekunde
+    if (periodTime == 15015 & seconds >= 1)
+    {
+        seconds--;
+        periodTime = 0;        
+    } 
+    
+    PORTB ^= (1 << PB0);
+    if (seconds >= 60) 
+    {
         seconds = 0;
         minutes++;
-        
-        if (minutes >= 60) {
+        if (minutes >= 60) 
+        {
             minutes = 0;
-            hours++;
-            
-            if (hours >= 24) {
-                hours = 0;
+            hours = (hours + 1) % 24;
+        }
+    }
+}
+
+void CheckSleepMode(){
+    if (sleepMode) 
+    {   
+        disablePWM();
+        turnOffLEDs();
+        set_sleep_mode(SLEEP_MODE_PWR_SAVE);
+        sleep_enable();
+        sleep_cpu();
+    } 
+    else 
+    {
+        enablePWM();
+        set_sleep_mode(SLEEP_MODE_IDLE);
+        sleep_enable();   
+    }
+}
+
+void toggleSleepMode() 
+{
+    sleepMode = !sleepMode;
+}
+
+//TASTER
+void checkButtons() 
+{
+    static uint8_t taster2_gedrueckt = 0;
+    static uint8_t taster3_gedrueckt = 0;
+    static uint16_t simultaneous_press_timer = 0;
+    
+    // Zustände der Tasten speichern
+    uint8_t pd2_gedrueckt = !(PIND & (1 << PD2)); // Stunden-Taster (Taster 3)
+    uint8_t pd3_gedrueckt = !(PIND & (1 << PD3)); // Minuten-Taster (Taster 2)
+    uint8_t pd4_gedrueckt = !(PIND & (1 << PD4)); // Sleep-Taster (Taster 1)
+    
+    // Sleep-Taster
+    if (pd4_gedrueckt) { 
+        _delay_ms(100); // Entprellen
+        if (!(PIND & (1 << PD4))) 
+        {
+            toggleSleepMode();
+            while (!(PIND & (1 << PD4))); // Warten bis losgelassen wird
+        }
+    }
+    
+    // (Taster 2 + Taster 3)
+    if (pd2_gedrueckt && pd3_gedrueckt) 
+    {
+        simultaneous_press_timer++;
+        
+        // nach ca. 300ms Reset ausführen
+        if (simultaneous_press_timer > 6) {
+            _delay_ms(100);
+            if (!(PIND & (1 << PD2)) && !(PIND & (1 << PD3))) {
+                if (sleepMode) {
+                    toggleSleepMode();
+                } else {
+                    // Reset durchführen
+                    seconds = 0;
+                    minutes = 0;
+                    hours = 0;
+                }
+                while (!(PIND & (1 << PD2)) || !(PIND & (1 << PD3)));
+                
+                // Verhindern, dass die Einzelfunktionen ausgelöst werden
+                taster2_gedrueckt = 0;
+                taster3_gedrueckt = 0;
+                simultaneous_press_timer = 0;
+                return;
             }
+        
+        }
+    } else {
+        simultaneous_press_timer = 0; // Reset Timer
+        
+        // Minuten hochzählen (Taster 2)
+        if (pd3_gedrueckt && !taster2_gedrueckt) 
+        { 
+            _delay_ms(100); 
+            if (!(PIND & (1 << PD3))) 
+            {
+                taster2_gedrueckt = 1;
+                if (sleepMode) {
+                    toggleSleepMode();
+                } else {
+                    minutes = (minutes + 1) % 60;
+                }
+            }
+        } 
+        else if (!pd3_gedrueckt && taster2_gedrueckt) 
+        {
+            taster2_gedrueckt = 0;
+        }
+
+        // Stunden hochzählen (Taster 3)
+        if (pd2_gedrueckt && !taster3_gedrueckt) 
+        { 
+            _delay_ms(100);
+            if (!(PIND & (1 << PD2))) 
+            {
+                taster3_gedrueckt = 1;
+                if (sleepMode) {
+                    toggleSleepMode();
+                } else 
+                {
+                    hours = (hours + 1) % 24;
+                }
+            }
+        } else if (!pd2_gedrueckt && taster3_gedrueckt) 
+        {
+            taster3_gedrueckt = 0;
         }
     }
-    
-    // Update the binary clock display
-    update_display();
 }
 
-// Update the LED display
-void update_display() {
-    // For hours, we use PD0, PD1, PD5, PD6, PD7
-    uint8_t hours_display = 0;
-    
-    // Convert hours (0-23) to binary pattern for our specific pins
-    if (hours & 0x01) hours_display |= (1 << PD0);  // Bit 0
-    if (hours & 0x02) hours_display |= (1 << PD1);  // Bit 1
-    if (hours & 0x04) hours_display |= (1 << PD5);  // Bit 2
-    if (hours & 0x08) hours_display |= (1 << PD6);  // Bit 3
-    if (hours & 0x10) hours_display |= (1 << PD7);  // Bit 4
-    
-    // For minutes, we use PC0-PC5
-    uint8_t minutes_display = 0;
-    
-    // Convert minutes (0-59) to binary pattern
-    for (uint8_t i = 0; i < 6; i++) {
-        if (minutes & (1 << i)) {
-            minutes_display |= (1 << i);
-        }
+
+
+int main() 
+{
+    initLEDmitTundPWM();
+    initTimer2();
+    sei(); 
+
+    while (1) 
+    {
+        checkButtons();
+        CheckSleepMode();
+        updateLEDs();
     }
-    
-    // Since we're using common anode, we need to invert the logic
-    // (0 turns LED on, 1 turns LED off for the cathode pins)
-    PORTD = (PORTD & ~((1 << PD0) | (1 << PD1) | (1 << PD5) | (1 << PD6) | (1 << PD7))) | 
-            (~hours_display & ((1 << PD0) | (1 << PD1) | (1 << PD5) | (1 << PD6) | (1 << PD7)));
-    
-    PORTC = (PORTC & ~0x3F) | (~minutes_display & 0x3F);
-}
 
-// Configure the crystal oscillator
-void crystal_init() {
-    // Set the clock prescaler to 1
-    CLKPR = (1 << CLKPCE);
-    CLKPR = 0;
-    
-    // Configure for external crystal
-    // This assumes jumpers are set correctly for external crystal
-    // No need to configure PB6/PB7 as they're automatically used for the crystal
-}
-
-// Setup pins as outputs
-void pin_init() {
-    // Set PD0, PD1, PD5, PD6, PD7 as outputs for hours (cathodes)
-    DDRD |= (1 << PD0) | (1 << PD1) | (1 << PD5) | (1 << PD6) | (1 << PD7);
-    
-    // Set PC0-PC5 as outputs for minutes (cathodes)
-    DDRC |= (1 << PC0) | (1 << PC1) | (1 << PC2) | (1 << PC3) | (1 << PC4) | (1 << PC5);
-    
-    // Set PB1 and PB2 as outputs for PWM anodes
-    DDRB |= (1 << PB1) | (1 << PB2);
-}
-
-// Multiplexing function to alternate between hours and minutes display
-void multiplex() {
-    // Turn on hours display (PB1 high, PB2 low)
-    PORTB |= (1 << PB1);
-    PORTB &= ~(1 << PB2);
-    _delay_ms(5);
-    
-    // Turn on minutes display (PB1 low, PB2 high)
-    PORTB &= ~(1 << PB1);
-    PORTB |= (1 << PB2);
-    _delay_ms(5);
-}
-
-int main() {
-    // Initialize pins
-    pin_init();
-    
-    // Initialize crystal oscillator
-    crystal_init();
-    
-    // Initialize PWM
-    pwm_init();
-    
-    // Initialize timer for clock
-    timer_init();
-    
-    // Main loop
-    while (1) {
-        // Multiplex between hours and minutes display
-        multiplex();
-    }
-    
     return 0;
 }
