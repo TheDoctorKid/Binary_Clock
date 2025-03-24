@@ -87,7 +87,7 @@ ISR(TIMER2_OVF_vect)
     periodTime++;
     
     // Schaltsekunde
-    if (periodTime == 15015 & seconds >= 1)
+    if (periodTime == 15105 & seconds >= 1)
     {
         seconds--;
         periodTime = 0;        
